@@ -6,48 +6,78 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 
 
-contract Cyberfrens is ERC1155Supply, Ownable {
+contract Prism1155 is ERC1155Supply, Ownable {
   
  using Strings for uint256;
 
   /**
   @dev global
  */
-  uint256 public nextTokenId = 1;
-  uint256 public nextCollectionId = 1;
+  uint256 public nextTokenId;
+  uint256 public nextCollectionId;
+  uint256 public nextProjectId = 1;
   bytes32 public merkleRoot;
   
   /**
   @dev mappings
  */
   
-  mapping (uint256 => uint256) public tokenIdToMaxSupply;
+  //Project mappings
+  mapping (uint256 => Project) public projects;
+  mapping (uint256 => uint256[]) public projectToCollectionIds;
+  
+  //Collection mappings
   mapping(uint256 => Collection) public collections;
-  mapping(uint256 => uint256) public tokenIdToCollectionId;
   mapping(uint256 => uint256[]) public collectionIdToTokenIds;
+  
+  //Token mappings
+  mapping (uint256 => Token) public tokens;
+  
+  //Other mappings
   mapping(address => bool) public whitelistClaimed;
-  mapping (uint256 => uint256[]) public projectToCollection;
-
   
 
   /**
   @dev constructor
  */
 
-  constructor() ERC1155("https://game.example/api/item.json"){}
+  constructor(
+    uint256 _nextTokenId,
+    uint256 _nextCollectionId
+  ) ERC1155("https://game.example/api/item.json"){
 
+    nextTokenId = _nextTokenId;
+    nextCollectionId = _nextCollectionId;
+  }
 
-    /// Structs ///
+  /**
+  @dev structs
+ */
   
+  struct Project {
+    string name;
+    string projectURI; 
+    address manager;
+  }
+
   struct Collection {
     string name;
-    uint256 tokenPriceInWei; 
+    uint256 projectId;
     uint256 invocations;
     uint256 maxInvocations; 
     bool paused;
     bool locked;
   }
 
+  struct Token {
+    string name;
+    uint256 maxSupply;
+    uint256 tokenPriceInWei;
+    uint256 projectId;
+    uint256 collectionId;
+    bool paused;
+    bool locked;
+  }
 
   /**
   @dev modifiers
@@ -61,8 +91,8 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     _;
   }
 
-  modifier onlyTokenPrice(uint256 _collectionId, uint256 _value) {
-      require(_value >= collections[_collectionId].tokenPriceInWei,
+  modifier onlyTokenPrice(uint256 _tokenId, uint256 _value) {
+      require(_value >= tokens[_tokenId].tokenPriceInWei,
       "Must send at least current price"
     );
     _;
@@ -70,7 +100,7 @@ contract Cyberfrens is ERC1155Supply, Ownable {
 
   modifier onlyAllowedToken(uint256 _tokenId) {
       require(exists(_tokenId), "Token must exist");
-      require(tokenIdToMaxSupply[_tokenId] <= totalSupply(_tokenId),"Must not have reached max Supply"); 
+      require(tokens[_tokenId].maxSupply > totalSupply(_tokenId),"Must not have reached max Supply"); 
     _;
   }
 
@@ -79,34 +109,15 @@ contract Cyberfrens is ERC1155Supply, Ownable {
   @dev setup and mint Functions
  */
 
-  function addTokenToCollection(uint256 _amountOfNewTokenIDs ,uint256 _collectionId, uint256[] memory _maxSupply) 
-    public 
-    onlyOwner 
-    returns(uint256[] memory _tokenIds)
-  {
-    uint256[] memory newTokenIds;
-    for (uint256 i= 0; i < _amountOfNewTokenIDs; i++) {
-      uint256 maxSup = _maxSupply[i];
-      tokenIdToCollectionId[nextTokenId] = _collectionId;
-      collectionIdToTokenIds[_collectionId].push(nextTokenId);
-      tokenIdToMaxSupply[nextTokenId] = maxSup;
-      newTokenIds[i] = nextTokenId;
-      nextTokenId++;
-    }
-    return newTokenIds;
-  }
-
-
   function mintTo(address _to, uint256 _tokenId, uint256 _amount, uint256 _collectionId) 
-  external
-  payable  
+    external
+    payable  
   {
     if (msg.sender != owner()){
       _splitFunds(_collectionId);
     }
     _mintTo(_to, _tokenId ,_collectionId,_amount);
   }
-
 
  function _mintTo(address _to,  uint256 _tokenId, uint256 _collectionId,  uint256 _amount) 
   internal
@@ -115,9 +126,8 @@ contract Cyberfrens is ERC1155Supply, Ownable {
   {
     collections[_collectionId].invocations++;
     _mint(_to, _tokenId, _amount,"");
-    emit Mint(_to,_tokenId,_collectionId,collections[_collectionId].invocations,collections[_collectionId].tokenPriceInWei);
+    emit Mint(_to,_tokenId,_collectionId,collections[_collectionId].invocations,tokens[_tokenId].tokenPriceInWei);
   }
-
 
   function mintBatch(
         uint256[] memory _ids,
@@ -127,8 +137,10 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     public 
     onlyOwner 
     {
+      
       for (uint256 i=0;i < _ids.length; i++){
         require(exists(_ids[i]), "Token must exist");
+        require(_amounts[i] + totalSupply(_ids[i]) <= tokens[_ids[i]].maxSupply, "Supply must be smaller than Max");
       }
       _mintBatch(owner(),_ids, _amounts, _data);
     }
@@ -138,12 +150,12 @@ contract Cyberfrens is ERC1155Supply, Ownable {
   @dev helpers 
  */
 
-  function _splitFunds(uint256 _collectionId) 
+  function _splitFunds(uint256 _tokenId) 
     internal
-    onlyTokenPrice(_collectionId, msg.value)
+    onlyTokenPrice(_tokenId, msg.value)
   {
     if (msg.value > 0) {
-      uint256 tokenPriceInWei = collections[_collectionId].tokenPriceInWei;
+      uint256 tokenPriceInWei = tokens[_tokenId].tokenPriceInWei;
       uint256 refund = msg.value - tokenPriceInWei;
       if (refund > 0) {
         payable(msg.sender).transfer(refund);
@@ -159,19 +171,76 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     _setURI(_newBaseURI);
   }
 
-  function tokenURI(uint256 _tokenId)
-    public
-    view
-    returns (string memory)
+  /**
+  @dev token functions
+ */
+  
+    function createTokens(string[] memory _name, uint256[] memory _price, uint256[] memory _projectId, uint256[] memory _collectionId, uint256[] memory _maxSupply) 
+    public 
+    onlyOwner
   {
-    return
-      string(
-        abi.encodePacked(
-          uri(_tokenId),
-          "/nfts/", Strings.toString(_tokenId))
-        );
+    for (uint256 i= 0; i < _name.length; i++) {
+      Token memory token;
+      token.name = _name[i];
+      token.projectId = _projectId[i];
+      token.collectionId = _collectionId[i];
+      token.tokenPriceInWei = _price[i];
+      token.maxSupply = _maxSupply[i]; 
+      token.paused = true;
+      token.locked = false;
+      tokens[nextTokenId] = token;
+      
+      collectionIdToTokenIds[token.collectionId].push(nextTokenId);
+      emit TokenAdded(token.name, nextTokenId,token.projectId ,token.collectionId , token.tokenPriceInWei, token.maxSupply);
+      nextTokenId++;   
+    }
+  }
+  
+  function viewTokenConfig(uint256 _tokenId) public view
+    returns (
+      string memory name,
+      uint256 projectId,
+      uint256 collectionId,
+      uint256 tokenPriceInWei,
+      uint256 maxSupply,
+      bool paused,
+      bool locked
+      )
+  {
+    name = tokens[_tokenId].name;
+    projectId = tokens[_tokenId].projectId;
+    collectionId = tokens[_tokenId].collectionId;
+    tokenPriceInWei = tokens[_tokenId].tokenPriceInWei;
+    maxSupply = tokens[_tokenId].maxSupply;
+    paused = tokens[_tokenId].paused;
+    locked = tokens[_tokenId].locked;
   }
 
+  function exists(uint256 id) public view override returns (bool) {
+      return tokens[id].maxSupply != 0;
+    }
+
+  function lockToken(uint256 _tokenId) public onlyOwner {
+    tokens[_tokenId].locked = true;
+  }
+
+  function pauseToken(uint256 _tokenId) public onlyOwner {
+    tokens[_tokenId].paused = !tokens[_tokenId].paused;
+  }
+
+  function addTokenMaxSupply(uint256 _tokenId, uint256 _maxSupply) public onlyOwner {
+    tokens[_tokenId].maxSupply = _maxSupply;
+  }
+
+  function tokenURI(uint256 _tokenId)
+  public
+  view
+  returns (string memory)
+{
+  return string(abi.encodePacked(
+    uri(_tokenId),
+    "/nfts/", Strings.toString(_tokenId)));
+}
 
   /**
   @dev collection functions
@@ -195,33 +264,28 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     collections[_collectionId].maxInvocations = _maxInvocations;
   }
 
-  function addCollectionPrice(uint256 _collectionId, uint256 _tokenPriceInWei) public onlyOwner {
-    collections[_collectionId].tokenPriceInWei = _tokenPriceInWei;
-  }
 
-
-  function addCollection(
+  function createCollection(
     string memory _name,
-    uint256 _tokenPriceInWei,
     uint256 _maxInvocations,
     uint256 _projectId
   ) public onlyOwner {
     uint256 collectionId = nextCollectionId;
     collections[collectionId].name = _name;
-    collections[collectionId].tokenPriceInWei = _tokenPriceInWei;
     collections[collectionId].maxInvocations = _maxInvocations;
     collections[collectionId].paused = true;
     collections[collectionId].locked = false;
-    projectToCollection[_projectId].push(nextCollectionId);
+    projectToCollectionIds[_projectId].push(nextCollectionId);
     nextCollectionId++;
   }
+
 
   function viewCollectionDetails(uint256 _collectionId)
     public
     view
     returns (
       string memory name,
-      uint256 tokenPriceInWei,
+      uint256 projectId,
       uint256 invocations,
       uint256 maxInvocations,
       bool paused,
@@ -229,7 +293,7 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     )
   {
     name = collections[_collectionId].name;
-    tokenPriceInWei = collections[_collectionId].tokenPriceInWei;
+    projectId = collections[_collectionId].projectId;
     maxInvocations = collections[_collectionId].maxInvocations;
     invocations = collections[_collectionId].invocations;
     paused = collections[_collectionId].paused;
@@ -240,8 +304,22 @@ contract Cyberfrens is ERC1155Supply, Ownable {
   @dev project functions
  */
 
-  function viewCollectionsOfProjects(uint256 _projectId) public view returns (uint256[] memory collections){
-    return projectToCollection[_projectId];
+function createProject(
+    string memory _name,
+    string memory _projectURI,
+    address _manager
+  ) public onlyOwner {
+
+    Project memory project;
+    project.name = _name;
+    project.projectURI = _projectURI;
+    project.manager = _manager;
+    projects[nextProjectId] = project;
+    nextProjectId++;
+  }
+
+  function viewCollectionsOfProjects(uint256 _projectId) public view returns (uint256[] memory _collections){
+    return projectToCollectionIds[_projectId];
   }
 
     /**
@@ -253,6 +331,15 @@ contract Cyberfrens is ERC1155Supply, Ownable {
     uint256 indexed _collectionId,
     uint256 _invocations,
     uint256 _value
+  );
+
+  event TokenAdded(
+    string _name,
+    uint256 indexed _tokenID,
+    uint256 indexed _projectId,
+    uint256 indexed _collectionId,
+    uint256 _price,
+    uint256 _maxSupply
   );
 
 }
