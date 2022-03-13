@@ -1,5 +1,4 @@
 import express, { Request, Response } from 'express'
-import { getCompletion } from '../openAI/gpt3functions'
 import { TableInserOrUpdateBody } from '../utils/types'
 
 import fetch from 'node-fetch'
